@@ -1,0 +1,190 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * OnePlus 15 (CPH2749) board devicetree for U-Boot.
+ *
+ * (C) Copyright 2026 EYC <e@eyc.one>
+ *
+ * Node addresses, clock indices and PHY parameters follow the Linux
+ * kaanapali DTS material (BSD-3-Clause, (c) Qualcomm) and FantomTchi7's
+ * OnePlus 15 board DTS in the Linux tree.
+ *
+ * U-Boot runs here as an Android boot image chainloaded by ABL, and inherits
+ * the hardware ABL already brought up. Only the blocks U-Boot itself drives
+ * are described.
+ *
+ * There is deliberately no /memory node: board_fdt_blob_setup() prefers this
+ * devicetree for control data, but falls back to the devicetree ABL passed in
+ * when this one carries no usable /memory. Leaving /memory out is what makes
+ * U-Boot take the RAM ranges from ABL rather than a hardcoded guess.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/clock/qcom,kaanapali-gcc.h>
+#include <dt-bindings/clock/qcom,rpmh.h>
+#include <dt-bindings/clock/qcom,sm8750-tcsr.h>
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	model = "OnePlus 15";
+	compatible = "oneplus,infiniti", "qcom,kaanapali";
+	chassis-type = "handset";
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * ABL leaves the DPU scanning out of the splash buffer, so
+		 * U-Boot can draw the console into it with no display driver.
+		 * Geometry matches the panel ABL programmed: 1272x2772, 32bpp.
+		 */
+		framebuffer: framebuffer@fc800000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xfc800000 0x0 (1272 * 2772 * 4)>;
+			width = <1272>;
+			height = <2772>;
+			stride = <(1272 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		cont_splash: framebuffer@fc800000 {
+			reg = <0x0 0xfc800000 0x0 0x2b00000>;
+			no-map;
+		};
+	};
+
+	/*
+	 * RPMh clock output. In the Linux kaanapali.dtsi this lives inside the
+	 * apps_rsc; U-Boot's kaanapali_rpmh_clk driver only reports fixed rates
+	 * and drives no hardware, so it is modelled here as a standalone,
+	 * reg-less clock controller. It provides the UFS PHY reference clock.
+	 */
+	rpmhcc: clock-controller {
+		compatible = "qcom,kaanapali-rpmh-clk";
+		#clock-cells = <1>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		gcc: clock-controller@100000 {
+			compatible = "qcom,kaanapali-gcc";
+			reg = <0x0 0x00100000 0x0 0x1f4200>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+			#power-domain-cells = <1>;
+		};
+
+		tcsr: clock-controller@1fc0000 {
+			compatible = "qcom,kaanapali-tcsr", "syscon";
+			reg = <0x0 0x01fc0000 0x0 0x30000>;
+			clocks = <&rpmhcc RPMH_CXO_CLK>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+		};
+
+		/*
+		 * The SMMU on Qualcomm phones is brought up early by firmware,
+		 * is partly emulated by the hypervisor, and cannot be turned
+		 * off; streams with no mapping FAULT. The first M2 boot proved
+		 * it the hard way: with iommus omitted, DME link startup
+		 * succeeded but every UTP transfer timed out with the UTRD's
+		 * OCS still at its 0xF initializer - the controller could not
+		 * fetch its descriptors from DDR. U-Boot's qcom_smmu500 driver
+		 * installs an identity stream mapping at controller probe.
+		 * compatible/reg/#iommu-cells and the UFS stream ID below are
+		 * copied verbatim from the Linux kaanapali.dtsi; interrupts,
+		 * #global-interrupts and dma-coherent are omitted (the U-Boot
+		 * driver consumes none of them).
+		 */
+		apps_smmu: iommu@15000000 {
+			compatible = "qcom,kaanapali-smmu-500", "qcom,smmu-500",
+				     "arm,mmu-500";
+			reg = <0x0 0x15000000 0x0 0x100000>;
+			#iommu-cells = <2>;
+		};
+
+		/*
+		 * UFS is the only storage on this phone (kaanapali.dtsi disables
+		 * sdhci). These two nodes are enabled so U-Boot can bring up the
+		 * controller and QMP UFS PHY to READ the ex01_esp partition (M2).
+		 * The register, clock, reset, power-domain and iommu properties
+		 * are copied verbatim from the Linux kaanapali.dtsi; properties
+		 * U-Boot does not consume (interrupts, interconnects, the OPP
+		 * table) are omitted so no dangling phandle to an absent provider
+		 * (rpmhpd, the NoCs) is created. This build's UFS is
+		 * READ-ONLY by construction (the SCSI write/erase ops are stripped
+		 * downstream), so no storage write path exists behind them.
+		 */
+		ufs_mem_phy: phy@1d80000 {
+			compatible = "qcom,kaanapali-qmp-ufs-phy",
+				     "qcom,sm8750-qmp-ufs-phy";
+			reg = <0x0 0x01d80000 0x0 0x2000>;
+
+			clocks = <&rpmhcc RPMH_CXO_CLK>,
+				 <&gcc GCC_UFS_PHY_PHY_AUX_CLK>,
+				 <&tcsr TCSR_UFS_CLKREF_EN>;
+			clock-names = "ref",
+				      "ref_aux",
+				      "qref";
+
+			power-domains = <&gcc GCC_UFS_MEM_PHY_GDSC>;
+
+			#clock-cells = <1>;
+			#phy-cells = <0>;
+
+			status = "okay";
+		};
+
+		ufs_mem_hc: ufs@1d84000 {
+			compatible = "qcom,kaanapali-ufshc",
+				     "qcom,ufshc",
+				     "jedec,ufs-2.0";
+			reg = <0x0 0x01d84000 0x0 0x3000>;
+
+			clocks = <&gcc GCC_UFS_PHY_AXI_CLK>,
+				 <&gcc GCC_AGGRE_UFS_PHY_AXI_CLK>,
+				 <&gcc GCC_UFS_PHY_AHB_CLK>,
+				 <&gcc GCC_UFS_PHY_UNIPRO_CORE_CLK>,
+				 <&rpmhcc RPMH_LN_BB_CLK3>,
+				 <&gcc GCC_UFS_PHY_TX_SYMBOL_0_CLK>,
+				 <&gcc GCC_UFS_PHY_RX_SYMBOL_0_CLK>,
+				 <&gcc GCC_UFS_PHY_RX_SYMBOL_1_CLK>;
+			clock-names = "core_clk",
+				      "bus_aggr_clk",
+				      "iface_clk",
+				      "core_clk_unipro",
+				      "ref_clk",
+				      "tx_lane0_sync_clk",
+				      "rx_lane0_sync_clk",
+				      "rx_lane1_sync_clk";
+
+			resets = <&gcc GCC_UFS_PHY_BCR>;
+			reset-names = "rst";
+
+			power-domains = <&gcc GCC_UFS_PHY_GDSC>;
+
+			iommus = <&apps_smmu 0x60 0x0>;
+
+			phys = <&ufs_mem_phy>;
+			phy-names = "ufsphy";
+
+			#reset-cells = <1>;
+
+			status = "okay";
+		};
+	};
+};
