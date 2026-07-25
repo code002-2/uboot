@@ -1875,9 +1875,23 @@ enum ufs_ref_clk_freq ufshcd_parse_dev_ref_clk_freq(struct ufs_hba *hba, struct 
 	return ufs_get_bref_clk_from_hz(freq);
 }
 
+/*
+ * Downstream safety patch, never to be upstreamed: upstream's ufshcd_set_dev_ref_clk() WRITES the
+ * bRefClkFreq device attribute whenever the host's idea of the reference
+ * clock disagrees with the device's. bRefClkFreq is a PERSISTENT
+ * device-configuration attribute: a WRITE_ATTR issued with a wrong host
+ * rate (for example from an under-reporting clock driver) would durably
+ * reprogram configuration that the boot firmware already set, on a phone
+ * with no recovery below fastboot. This build therefore never issues
+ * UPIU_QUERY_OPCODE_WRITE_ATTR here: it READS the attribute, VERIFIES it
+ * against the host rate, and REFUSES to bring up UFS on a mismatch.
+ *
+ * This also initializes err: upstream leaves it uninitialized on the
+ * REF_CLK_FREQ_INVAL early exit.
+ */
 static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
 {
-	int err;
+	int err = 0;
 	struct clk *ref_clk;
 	u32 host_ref_clk_freq;
 	u32 dev_ref_clk_freq;
@@ -1908,17 +1922,15 @@ static int ufshcd_set_dev_ref_clk(struct ufs_hba *hba)
 	if (dev_ref_clk_freq == host_ref_clk_freq)
 		goto out; /* nothing to update */
 
-	err = ufshcd_query_attr_retry(hba, UPIU_QUERY_OPCODE_WRITE_ATTR,
-				      QUERY_ATTR_IDN_REF_CLK_FREQ, 0, 0, &host_ref_clk_freq);
-
-	if (err) {
-		dev_err(hba->dev, "bRefClkFreq setting to %lu Hz failed\n",
-			ufs_ref_clk_freqs[host_ref_clk_freq].freq_hz);
-		goto out;
-	}
-
-	dev_dbg(hba->dev, "bRefClkFreq setting to %lu Hz succeeded\n",
-		ufs_ref_clk_freqs[host_ref_clk_freq].freq_hz);
+	/*
+	 * Downstream safety patch (see the function comment): never issue
+	 * UPIU_QUERY_OPCODE_WRITE_ATTR against bRefClkFreq. Fail closed
+	 * instead, so the mismatch is investigated rather than persisted.
+	 */
+	dev_err(hba->dev,
+		"bRefClkFreq mismatch (device %u, host %u): refusing to bring up UFS rather than write a persistent device attribute\n",
+		dev_ref_clk_freq, host_ref_clk_freq);
+	err = -EINVAL;
 
 out:
 	return err;
@@ -1989,8 +2001,8 @@ static int ufshcd_get_max_pwr_mode(struct ufs_hba *hba)
 	return ufshcd_ops_get_max_pwr_mode(hba, &hba->max_pwr_info);
 }
 
-static int ufshcd_change_power_mode(struct ufs_hba *hba,
-				    struct ufs_pa_layer_attr *pwr_mode)
+static int __maybe_unused ufshcd_change_power_mode(struct ufs_hba *hba,
+						   struct ufs_pa_layer_attr *pwr_mode)
 {
 	int ret;
 
@@ -2151,24 +2163,52 @@ static int ufs_start(struct ufs_hba *hba)
 		return ret;
 	}
 
-	ufshcd_set_dev_ref_clk(hba);
+	/*
+	 * Downstream safety patch: the fail-closed bRefClkFreq check must
+	 * actually stop the bring-up, so its result is no longer ignored.
+	 */
+	ret = ufshcd_set_dev_ref_clk(hba);
+	if (ret)
+		return ret;
 
 	if (ufshcd_get_max_pwr_mode(hba)) {
 		dev_err(hba->dev,
 			"%s: Failed getting max supported power mode\n",
 			__func__);
 	} else {
-		ret = ufshcd_change_power_mode(hba, &hba->max_pwr_info.info);
-		if (ret) {
-			dev_err(hba->dev, "%s: Failed setting power mode, err = %d\n",
-				__func__, ret);
-
-			return ret;
-		}
+		/*
+		 * Downstream: STAY IN THE PWM SLOW-AUTO MODE the link starts
+		 * in; do not switch to HS. On boots 2026-07-18-023814z and
+		 * 031442z every pre-switch transfer (NOP, fDeviceInit,
+		 * descriptor reads) completed and every SCSI command AFTER
+		 * the HS power-mode change timed out; boot 041227z confirmed
+		 * every transfer completes at PWM. Reading the ESP needs no
+		 * HS bandwidth.
+		 */
+		printf("ufsdiag: staying in PWM (HS power-mode change skipped)\n");
 
 		debug("UFS Device %s is up!\n", hba->dev->name);
 		ufshcd_print_pwr_info(hba);
 	}
+
+	/*
+	 * Downstream: the link is still in the SLOWAUTO (PWM) mode it
+	 * started in - record that in max_pwr_info so the transfer timeout
+	 * in ufshcd_send_command() is DISABLED, per upstream 080b4f09955
+	 * ("ufs: Disable UTP command timeout in slow mode"): at PWM rates a
+	 * large multi-block READ legitimately takes longer than the 1.5s
+	 * QUERY_REQ_TIMEOUT. Boot 2026-07-18-053822z timed out exactly
+	 * there: small reads (extlinux.conf, the GPT) completed, the 83MB
+	 * kernel read died a few FAT clusters in with the link still alive
+	 * (peer DME_GET rc=0). The early device-management commands above
+	 * ran BEFORE this point with max_pwr_info still zeroed, so they
+	 * kept the 1.5s timeout, as on every proven boot. Set both fields
+	 * on both ufshcd_get_max_pwr_mode() outcomes: we stay in PWM either
+	 * way. Any future HS re-enable must re-derive max_pwr_info before
+	 * calling ufshcd_change_power_mode().
+	 */
+	hba->max_pwr_info.info.pwr_rx = SLOWAUTO_MODE;
+	hba->max_pwr_info.info.pwr_tx = SLOWAUTO_MODE;
 
 	return 0;
 }

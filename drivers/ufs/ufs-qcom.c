@@ -643,11 +643,47 @@ static struct ufs_hba_ops ufs_qcom_hba_ops = {
 	.device_reset		= ufs_qcom_device_reset,
 };
 
+/*
+ * Downstream diagnostic (read-only): report whether the boot firmware left
+ * the UFS ICE (Inline Crypto Engine) core clock running. On these SoCs the
+ * UFS DATA path crosses ICE even for unencrypted transfers, while UIC
+ * (register-level) traffic and descriptor fetches do not - a gated ICE
+ * core clock is one candidate for "every data-phase command times out
+ * while NOP/QUERY transfers work". Constants copied from Linux, never
+ * hand-derived:
+ *   GCC base 0x00100000          arch/arm64/boot/dts/qcom/kaanapali.dtsi
+ *   ICE core branch CBCR 0x7707c drivers/clk/qcom/gcc-kaanapali.c
+ *                                (gcc_ufs_phy_ice_core_clk.halt_reg)
+ *   ICE core CMD_RCGR    0x7708c drivers/clk/qcom/gcc-kaanapali.c
+ *                                (gcc_ufs_phy_ice_core_clk_src.cmd_rcgr)
+ * CBCR bit 31 is the CLK_OFF status bit (1 = the branch clock is off).
+ */
+#define KAANAPALI_GCC_BASE		0x00100000UL
+#define KAANAPALI_ICE_CORE_CBCR		0x7707cUL
+#define KAANAPALI_ICE_CORE_CMD_RCGR	0x7708cUL
+
+static void ufs_qcom_report_ice_clk(void)
+{
+	u32 cbcr, cmd, cfg;
+
+	if (!IS_ENABLED(CONFIG_CLK_QCOM_KAANAPALI))
+		return;
+
+	cbcr = readl(KAANAPALI_GCC_BASE + KAANAPALI_ICE_CORE_CBCR);
+	cmd = readl(KAANAPALI_GCC_BASE + KAANAPALI_ICE_CORE_CMD_RCGR);
+	cfg = readl(KAANAPALI_GCC_BASE + KAANAPALI_ICE_CORE_CMD_RCGR + 0x4);
+
+	printf("ufsdiag: ICE core CBCR=%08x (%s) CMD_RCGR=%08x CFG=%08x\n",
+	       cbcr, (cbcr & BIT(31)) ? "CLK OFF" : "clk on", cmd, cfg);
+}
+
 static int ufs_qcom_probe(struct udevice *dev)
 {
 	struct ufs_qcom_priv *priv = dev_get_priv(dev);
 	struct icc_path *path;
 	int ret;
+
+	ufs_qcom_report_ice_clk();
 
 	path = of_icc_get(dev, "ufs-ddr");
 	if (!IS_ERR(path))

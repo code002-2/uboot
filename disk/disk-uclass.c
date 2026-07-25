@@ -79,48 +79,15 @@ unsigned long disk_blk_read(struct udevice *dev, lbaint_t start,
 			blkcnt, buffer);
 }
 
-/**
- * disk_blk_write() - Write to a block device
- *
- * @dev: Device to write to (partition udevice)
- * @start: Start block for the write (from start of partition)
- * @blkcnt: Number of blocks to write (within the partition)
- * @buffer: Data to write
- * @return number of blocks written (which may be less than @blkcnt),
- * or -ve on error. This never returns 0 unless @blkcnt is 0
+/*
+ * Downstream safety patch, never to be upstreamed: this build's storage must be READ-ONLY, enforced by
+ * the linker rather than by good behaviour. disk_blk_write() and
+ * disk_blk_erase() are removed and .write/.erase are left out of the
+ * KEEP'd blk_part_ops below, so the partition block devices carry no
+ * write path and blk_write()/blk_erase() lose their last reference and
+ * are dropped by --gc-sections. blk_dwrite() on a partition device then
+ * fails with -ENOSYS at runtime (drivers/block/blk-uclass.c).
  */
-unsigned long disk_blk_write(struct udevice *dev, lbaint_t start,
-			     lbaint_t blkcnt, const void *buffer)
-{
-	int ret = disk_blk_part_validate(dev, start, blkcnt);
-
-	if (ret)
-		return ret;
-
-	return blk_write(dev_get_parent(dev), disk_blk_part_offset(dev, start),
-			 blkcnt, buffer);
-}
-
-/**
- * disk_blk_erase() - Erase part of a block device
- *
- * @dev: Device to erase (partition udevice)
- * @start: Start block for the erase (from start of partition)
- * @blkcnt: Number of blocks to erase (within the partition)
- * @return number of blocks erased (which may be less than @blkcnt),
- * or -ve on error. This never returns 0 unless @blkcnt is 0
- */
-unsigned long disk_blk_erase(struct udevice *dev, lbaint_t start,
-			     lbaint_t blkcnt)
-{
-	int ret = disk_blk_part_validate(dev, start, blkcnt);
-
-	if (ret)
-		return ret;
-
-	return blk_erase(dev_get_parent(dev), disk_blk_part_offset(dev, start),
-			 blkcnt);
-}
 
 UCLASS_DRIVER(partition) = {
 	.id		= UCLASS_PARTITION,
@@ -130,8 +97,6 @@ UCLASS_DRIVER(partition) = {
 
 static const struct blk_ops blk_part_ops = {
 	.read	= disk_blk_read,
-	.write	= disk_blk_write,
-	.erase	= disk_blk_erase,
 };
 
 U_BOOT_DRIVER(blk_partition) = {
