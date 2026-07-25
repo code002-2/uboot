@@ -265,6 +265,29 @@ static int configure_smr_s2cr(struct qcom_smmu_priv *priv, struct mmu_dev *mdev)
 	/* Make sure our writes went through */
 	mb();
 
+	/*
+	 * Downstream diagnostic: upstream exits this loop SILENTLY when
+	 * every SMR is already valid, leaving the stream unmapped while the
+	 * probe succeeds. Say so instead.
+	 */
+	if (i == priv->num_smr) {
+		printf("smmudiag: %s: NO free SMR - stream 0x%x NOT mapped\n",
+		       priv->dev->name, mdev->sid);
+		return 0;
+	}
+
+	/*
+	 * Downstream diagnostic: read every register we wrote back. A
+	 * hypervisor that silently discards these writes is otherwise
+	 * undetectable; the mapping only exists if the readback agrees.
+	 */
+	printf("smmudiag: %s sid=0x%x cb=%d smr[%d]=%08x s2cr=%08x cbar=%08x sctlr=%08x\n",
+	       mdev->dev->name, mdev->sid, mdev->cbx, mdev->smr,
+	       gr0_readl(priv, ARM_SMMU_GR0_SMR(mdev->smr)),
+	       gr0_readl(priv, ARM_SMMU_GR0_S2CR(mdev->smr)),
+	       gr1_readl(priv, ARM_SMMU_GR1_CBAR(mdev->cbx)),
+	       cbx_readl(priv, mdev->cbx, ARM_SMMU_CB_SCTLR));
+
 	return 0;
 }
 
@@ -280,8 +303,16 @@ static int qcom_smmu_connect(struct udevice *dev)
 	if (WARN_ON(!priv))
 		return -EINVAL;
 
-	if (priv->disable)
+	if (priv->disable) {
+		/*
+		 * Downstream diagnostic: upstream no-ops SILENTLY here when
+		 * running above EL1, so "the fix booted" and "the fix never
+		 * ran" are indistinguishable on the panel. Say so.
+		 */
+		printf("smmudiag: %s: connect SKIPPED (EL%u > 1, driver disabled)\n",
+		       dev->name, current_el());
 		return 0;
+	}
 
 	mdev = alloc_dev(dev);
 	if (IS_ERR(mdev) && PTR_ERR(mdev) != -EEXIST) {
@@ -367,6 +398,26 @@ static int qcom_smmu_probe(struct udevice *dev)
 			     << (FIELD_GET(ARM_SMMU_ID1_NUMPAGENDXB, val) + 1);
 
 	dump_boot_mappings(priv);
+
+	/*
+	 * Downstream diagnostic: one line answering, on the panel, the
+	 * questions the 2026-07-18-031442z boot could not: what EL u-boot
+	 * runs at (the driver no-ops above EL1), whether the ID registers
+	 * decode sanely, and how many SMRs the firmware left valid.
+	 */
+	{
+		int i, valid = 0;
+
+		for (i = 0; i < priv->num_smr; i++)
+			if (gr0_readl(priv, ARM_SMMU_GR0_SMR(i)) &
+			    ARM_SMMU_SMR_VALID)
+				valid++;
+
+		printf("smmudiag: EL%u smr=%d (valid=%d) cb=%d pgshift=%u%s\n",
+		       current_el(), priv->num_smr, valid, priv->num_cb,
+		       priv->pgshift,
+		       priv->disable ? " DISABLED(EL>1)" : "");
+	}
 
 	return 0;
 }
