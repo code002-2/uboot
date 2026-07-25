@@ -804,13 +804,20 @@ static int label_boot(struct pxe_context *ctx, struct pxe_label *label)
 	kernel_addr_r = genimg_get_kernel_addr(kernel_addr);
 	buf = map_sysmem(kernel_addr_r, 0);
 
+	/*
+	 * Downstream: never fall back to fdtcontroladdr (U-Boot's own
+	 * control DTB). On this board the control DTB is a minimal
+	 * framebuffer-only devicetree; handing it to Linux "succeeds"
+	 * into a half-configured system with no storage and no way to
+	 * see what happened. A label must load a devicetree of its own
+	 * (or name a FIT with an embedded FDT). Refuse anything else so
+	 * the failure is loud and the next label can be tried instead.
+	 */
 	if (!bootm_argv[3] && genimg_get_format(buf) != IMAGE_FORMAT_FIT) {
-		if (IS_ENABLED(CONFIG_SUPPORT_PASSING_ATAGS)) {
-			if (strcmp("-", label->fdt))
-				bootm_argv[3] = env_get("fdtcontroladdr");
-		} else {
-			bootm_argv[3] = env_get("fdtcontroladdr");
-		}
+		printf("Skipping %s: no FDT was loaded for this label (fdtcontroladdr fallback is disabled downstream)\n",
+		       label->name);
+		unmap_sysmem(buf);
+		goto cleanup;
 	}
 
 	if (bootm_argv[3]) {
