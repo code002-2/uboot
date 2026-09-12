@@ -62,4 +62,13 @@ CONFIG_SYS_WHITE_ON_BLACK=y
 CONFIG_NO_FB_CLEAR=y
 CONFIG_VIDEO_SIMPLE=y
 CONFIG_FS_FAT=y
+# The UFS LUNs report a 4096-byte logical block size, and U-Boot's FAT driver
+# compares that against the sector size in the FAT boot sector. Without this
+# option the comparison is only logged and the driver then reads as if the two
+# matched, so a 512-byte-sector FAT (what every desktop tool produces by
+# default, mtools and mkfs.fat included) silently reads at the wrong offsets:
+# sysboot mounts the filesystem, fails to read /extlinux/extlinux.conf, and
+# reports "FAT sector size mismatch (fs=512, dev=4096)" followed by "Error
+# reading config file". With it, both 512- and 4096-byte-sector FATs work.
+CONFIG_FS_FAT_HANDLE_SECTOR_SIZE_MISMATCH=y
 CONFIG_PANIC_HANG=y
