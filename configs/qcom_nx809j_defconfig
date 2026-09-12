@@ -23,7 +23,16 @@ CONFIG_CMD_MEMINFO_MAP=y
 # CONFIG_CMD_UNZIP is not set
 CONFIG_CMD_CLK=y
 CONFIG_CMD_PART=y
-# CONFIG_CMD_SCSI is not set
+# The scsi command is how we can SEE the UFS LUNs: `scsi scan` prints one
+# "Device N:" line plus dev_print() per detected LUN, and dev_print ends with
+# "Capacity: ... (LBA x BLKSZ)" - the block size, which is exactly what
+# decides whether the GPT and the filesystem are being read at the right
+# offset. `scsi read` also gives a filesystem-free way to pull raw sectors.
+#
+# This does NOT open a write path: scsi_write()/scsi_erase() are removed in
+# drivers/scsi/scsi.c (the .write/.erase blk ops are not linked in at all), so
+# blk_write()/blk_erase() return -ENOSYS at runtime.
+CONFIG_CMD_SCSI=y
 CONFIG_CMD_PAUSE=y
 CONFIG_CMD_SYSBOOT=y
 CONFIG_SUPPORT_RAW_INITRD=y
